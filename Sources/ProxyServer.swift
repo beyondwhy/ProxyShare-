@@ -1,56 +1,69 @@
 import Foundation
 import Network
 
-/// HTTP/HTTPS forward proxy, the Swift version of the original a-Shell proxy.py.
-/// All networking runs on one serial queue; callbacks are delivered on the main queue.
+/// One proxied client connection, HTTP or SOCKS5.
+protocol RelaySession: AnyObject {
+    var onClose: (() -> Void)? { get set }
+    func start()
+    func close()
+}
+
+/// Copies bytes from `source` to `destination` until either side ends or fails, then calls `onEnd`.
+func relay(from source: NWConnection, to destination: NWConnection,
+           isClosed: @escaping () -> Bool, onEnd: @escaping () -> Void) {
+    source.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
+        guard !isClosed() else { return }
+        if let data = data, !data.isEmpty {
+            destination.send(content: data, completion: .contentProcessed { sendError in
+                guard !isClosed() else { return }
+                if sendError != nil || error != nil || isComplete {
+                    onEnd()
+                } else {
+                    relay(from: source, to: destination, isClosed: isClosed, onEnd: onEnd)
+                }
+            })
+        } else if isComplete || error != nil {
+            onEnd()
+        } else {
+            relay(from: source, to: destination, isClosed: isClosed, onEnd: onEnd)
+        }
+    }
+}
+
+/// Runs the HTTP/HTTPS proxy (the Swift version of the original a-Shell proxy.py) and a SOCKS5 proxy
+/// for UDP. All networking runs on one serial queue; callbacks are delivered on the main queue.
 final class ProxyServer {
     var onStatus: ((String) -> Void)?
     var onFailure: ((String) -> Void)?
     var onConnectionCount: ((Int) -> Void)?
 
     private let queue = DispatchQueue(label: "proxyshare.server")
-    private var listener: NWListener?
-    private var sessions: [ObjectIdentifier: ProxySession] = [:]
+    private var listeners: [NWListener] = []
+    private var readyCount = 0
+    private var sessions: [ObjectIdentifier: RelaySession] = [:]
     private var password = ""
 
-    func start(port: UInt16, password: String) throws {
+    func start(httpPort: UInt16, socksPort: UInt16, password: String) throws {
         stop()
-        guard let nwPort = NWEndpoint.Port(rawValue: port) else {
-            throw NSError(domain: "ProxyShare", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid port"])
+        let http = try makeListener(port: httpPort, name: "HTTP") { connection, password, queue in
+            ProxySession(client: connection, password: password, queue: queue)
         }
-        let params = NWParameters.tcp
-        params.allowLocalEndpointReuse = true
-        let listener = try NWListener(using: params, on: nwPort)
-
-        listener.stateUpdateHandler = { [weak self, weak listener] state in
-            guard let self = self, let listener = listener, self.listener === listener else { return }
-            switch state {
-            case .ready:
-                self.report(status: "Running on port \(port)")
-            case .failed(let error):
-                self.listener = nil
-                listener.cancel()
-                let message = "Could not start: \(error.localizedDescription)"
-                DispatchQueue.main.async { self.onFailure?(message) }
-            default:
-                break
-            }
+        let socks = try makeListener(port: socksPort, name: "SOCKS5") { connection, password, queue in
+            Socks5Session(client: connection, password: password, queue: queue)
         }
-        listener.newConnectionHandler = { [weak self] connection in
-            self?.accept(connection)
-        }
-
         queue.sync {
             self.password = password
-            self.listener = listener
+            self.readyCount = 0
+            self.listeners = [http, socks]
         }
-        listener.start(queue: queue)
+        http.start(queue: queue)
+        socks.start(queue: queue)
     }
 
     func stop() {
         queue.sync {
-            listener?.cancel()
-            listener = nil
+            listeners.forEach { $0.cancel() }
+            listeners.removeAll()
             let all = Array(sessions.values)
             sessions.removeAll()
             all.forEach { $0.close() }
@@ -59,8 +72,42 @@ final class ProxyServer {
         reportCount(0)
     }
 
-    private func accept(_ connection: NWConnection) {
-        let session = ProxySession(client: connection, password: password, queue: queue)
+    private func makeListener(
+        port: UInt16, name: String,
+        makeSession: @escaping (NWConnection, String, DispatchQueue) -> RelaySession
+    ) throws -> NWListener {
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else {
+            throw NSError(domain: "ProxyShare", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid \(name) port"])
+        }
+        let params = NWParameters.tcp
+        params.allowLocalEndpointReuse = true
+        let listener = try NWListener(using: params, on: nwPort)
+
+        listener.stateUpdateHandler = { [weak self, weak listener] state in
+            guard let self = self, let listener = listener, self.listeners.contains(where: { $0 === listener }) else { return }
+            switch state {
+            case .ready:
+                self.readyCount += 1
+                if self.readyCount == self.listeners.count {
+                    self.report(status: "Running")
+                }
+            case .failed(let error):
+                self.listeners.forEach { $0.cancel() }
+                self.listeners.removeAll()
+                let message = "Could not start \(name) on port \(port): \(error.localizedDescription)"
+                DispatchQueue.main.async { self.onFailure?(message) }
+            default:
+                break
+            }
+        }
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self = self else { return connection.cancel() }
+            self.accept(makeSession(connection, self.password, self.queue))
+        }
+        return listener
+    }
+
+    private func accept(_ session: RelaySession) {
         let id = ObjectIdentifier(session)
         sessions[id] = session
         session.onClose = { [weak self] in
@@ -81,8 +128,8 @@ final class ProxyServer {
     }
 }
 
-/// One client connection: reads the request head, connects upstream, then pipes bytes both ways.
-final class ProxySession {
+/// One HTTP proxy connection: reads the request head, connects upstream, then pipes bytes both ways.
+final class ProxySession: RelaySession {
     var onClose: (() -> Void)?
 
     private let client: NWConnection
@@ -271,28 +318,10 @@ final class ProxySession {
     }
 
     private func startPiping(_ upstream: NWConnection) {
-        pipe(from: client, to: upstream)
-        pipe(from: upstream, to: client)
-    }
-
-    private func pipe(from source: NWConnection, to destination: NWConnection) {
-        source.receive(minimumIncompleteLength: 1, maximumLength: Self.chunkSize) { [weak self] data, _, isComplete, error in
-            guard let self = self, !self.closed else { return }
-            if let data = data, !data.isEmpty {
-                destination.send(content: data, completion: .contentProcessed { [weak self] sendError in
-                    guard let self = self, !self.closed else { return }
-                    if sendError != nil || error != nil || isComplete {
-                        self.close()
-                    } else {
-                        self.pipe(from: source, to: destination)
-                    }
-                })
-            } else if isComplete || error != nil {
-                self.close()
-            } else {
-                self.pipe(from: source, to: destination)
-            }
-        }
+        let isClosed: () -> Bool = { [weak self] in self?.closed ?? true }
+        let end: () -> Void = { [weak self] in self?.close() }
+        relay(from: client, to: upstream, isClosed: isClosed, onEnd: end)
+        relay(from: upstream, to: client, isClosed: isClosed, onEnd: end)
     }
 
     private func respondAndClose(_ response: String) {

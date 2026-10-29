@@ -2,7 +2,8 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var controller = ProxyController()
-    @AppStorage("port") private var portText = "8080"
+    @AppStorage("port") private var httpPortText = "8080"
+    @AppStorage("socksPort") private var socksPortText = "1080"
     @AppStorage("password") private var password = ""
     @Environment(\.scenePhase) private var scenePhase
 
@@ -14,7 +15,7 @@ struct ContentView: View {
                         get: { controller.isRunning },
                         set: { on in
                             if on {
-                                controller.start(portText: portText, password: password)
+                                controller.start(httpPortText: httpPortText, socksPortText: socksPortText, password: password)
                             } else {
                                 controller.stop()
                             }
@@ -26,34 +27,31 @@ struct ContentView: View {
 
                 Section(
                     header: Text("Settings"),
-                    footer: Text("With no password, anyone on the same network can use your connection.")
+                    footer: Text("With no password, anyone on the same network can use your connection. For SOCKS5, any username works.")
                 ) {
-                    HStack {
-                        Text("Port")
-                        TextField("8080", text: $portText)
-                            .keyboardType(.numberPad)
-                            .multilineTextAlignment(.trailing)
-                    }
+                    portField("HTTP port", text: $httpPortText, placeholder: "8080")
+                    portField("SOCKS5 port", text: $socksPortText, placeholder: "1080")
                     SecureField("Password (optional)", text: $password)
                 }
                 .disabled(controller.isRunning)
 
                 Section(
                     header: Text("Proxy address for your PC"),
-                    footer: Text("Windows: Settings → Network & internet → Proxy → Manual proxy setup. Turn it off on the PC when you stop sharing.")
+                    footer: Text("HTTP works in Windows proxy settings (TCP only). SOCKS5 also carries UDP, for apps or VPN-style clients that support it. Turn the proxy off on the PC when you stop sharing.")
                 ) {
                     if controller.addresses.isEmpty {
                         Text("Connect to Wi-Fi or turn on Personal Hotspot.")
                             .foregroundColor(.secondary)
                     }
                     ForEach(controller.addresses, id: \.self) { address in
-                        HStack {
+                        VStack(alignment: .leading, spacing: 4) {
                             Text(address.label)
-                            Spacer()
-                            Text("\(address.ip):\(portText)")
-                                .font(.system(.body, design: .monospaced))
-                                .textSelection(.enabled)
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                            addressLine("HTTP", "\(address.ip):\(httpPortText)")
+                            addressLine("SOCKS5", "\(address.ip):\(socksPortText)")
                         }
+                        .padding(.vertical, 2)
                     }
                 }
 
@@ -78,6 +76,25 @@ struct ContentView: View {
             Text(title)
             Spacer()
             Text(value).foregroundColor(.secondary)
+        }
+    }
+
+    private func portField(_ title: String, text: Binding<String>, placeholder: String) -> some View {
+        HStack {
+            Text(title)
+            TextField(placeholder, text: text)
+                .keyboardType(.numberPad)
+                .multilineTextAlignment(.trailing)
+        }
+    }
+
+    private func addressLine(_ kind: String, _ value: String) -> some View {
+        HStack {
+            Text(kind)
+            Spacer()
+            Text(value)
+                .font(.system(.body, design: .monospaced))
+                .textSelection(.enabled)
         }
     }
 }

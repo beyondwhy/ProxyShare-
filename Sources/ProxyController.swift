@@ -25,14 +25,19 @@ final class ProxyController: ObservableObject {
         refreshAddresses()
     }
 
-    func start(portText: String, password: String) {
-        guard let port = UInt16(portText), port > 0 else {
-            errorMessage = "Port must be a number from 1 to 65535."
+    func start(httpPortText: String, socksPortText: String, password: String) {
+        guard let httpPort = UInt16(httpPortText), httpPort > 0,
+              let socksPort = UInt16(socksPortText), socksPort > 0 else {
+            errorMessage = "Ports must be numbers from 1 to 65535."
+            return
+        }
+        guard httpPort != socksPort else {
+            errorMessage = "The HTTP and SOCKS5 ports must be different."
             return
         }
         do {
             try keeper.start()
-            try server.start(port: port, password: password)
+            try server.start(httpPort: httpPort, socksPort: socksPort, password: password)
             isRunning = true
             errorMessage = nil
         } catch {
