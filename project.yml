@@ -1,0 +1,29 @@
+name: ProxyShare
+options:
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  ProxyShare:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    info:
+      path: Support/Info.plist
+      properties:
+        CFBundleDisplayName: ProxyShare
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UIBackgroundModes:
+          - audio
+        NSLocalNetworkUsageDescription: ProxyShare lets devices on your local network use this iPhone's internet connection.
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.proxyshare.ios
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"

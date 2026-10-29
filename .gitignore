@@ -1,0 +1,5 @@
+ProxyShare.xcodeproj/
+Support/Info.plist
+build/
+Payload/
+*.ipa
