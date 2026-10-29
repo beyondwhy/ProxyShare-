@@ -1,0 +1,26 @@
+workflows:
+  proxyshare-ipa:
+    name: ProxyShare unsigned IPA
+    instance_type: mac_mini_m2
+    max_build_duration: 30
+    environment:
+      xcode: latest
+    scripts:
+      - name: Install XcodeGen
+        script: brew install xcodegen
+      - name: Generate Xcode project
+        script: xcodegen generate
+      - name: Build (unsigned)
+        script: |
+          xcodebuild -project ProxyShare.xcodeproj -target ProxyShare \
+            -configuration Release -sdk iphoneos \
+            SYMROOT="$CM_BUILD_DIR/build" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+      - name: Package IPA
+        script: |
+          mkdir Payload
+          cp -R build/Release-iphoneos/ProxyShare.app Payload/
+          zip -qr ProxyShare.ipa Payload
+    artifacts:
+      - ProxyShare.ipa
